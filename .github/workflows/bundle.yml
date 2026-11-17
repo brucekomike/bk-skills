@@ -52,27 +52,36 @@ jobs:
           test -f dist/bundle-metadata.txt
 
           rm -rf unpack && mkdir unpack && tar -xzf "$t" -C unpack
-          root=$(ls unpack)
+          # The tree lives INSIDE unpack/; naming it without that prefix made
+          # every path below resolve against the workspace and fail silently,
+          # because a bare `test -f` prints nothing under `bash -e`.
+          root="unpack/$(ls unpack)"
+          [ -d "$root" ] || { echo "unexpected bundle layout: no $root/"; exit 1; }
 
           # The shared loader must be present AND match its shipped digest.
-          test -f "$root/skill-config/loader.sh"
-          test -f "$root/skill-config/loader.sha256"
+          for f in skill-config/loader.sh skill-config/loader.sha256 bundle-metadata.txt; do
+            test -f "$root/$f" || { echo "bundle is missing $f"; exit 1; }
+          done
           ( cd "$root" && sha256sum -c skill-config/loader.sha256 )
 
           # Every manifest entry must have been fetched and resolved.
           n=0
           while IFS=$'\t' read -r name url ref; do
             case "$name" in ''|\#*) continue ;; esac
-            grep -P "^skill\t$name\$"    "$root/bundle-metadata.txt" || { echo "missing: $name"; exit 1; }
-            grep -P "^commit\t[0-9a-f]{40}$" "$root/bundle-metadata.txt" >/dev/null || { echo "no resolved commit for $name"; exit 1; }
+            awk -F'\t' -v want="$name" '$1=="skill" && $2==want {found=1} END{exit !found}' \
+              "$root/bundle-metadata.txt" || { echo "metadata has no entry for $name"; exit 1; }
             n=$((n+1))
           done < manifest.tsv
+          [ "$n" -gt 0 ] || { echo "manifest selected nothing"; exit 1; }
+          grep -qE '^commit	[0-9a-f]{40}$' "$root/bundle-metadata.txt" \
+            || { echo "metadata has no resolved 40-char commit"; exit 1; }
           echo "verified $n manifest entries"
 
           # Every bundled skill must be a real skill, not an empty directory.
           found=0
+          shopt -s nullglob
           for d in "$root"/skills/*/; do
-            test -f "$d/SKILL.md" || { echo "bundle contains a skill with no SKILL.md: $d"; exit 1; }
+            test -f "$d/SKILL.md" || { echo "skill dir with no SKILL.md: $d"; exit 1; }
             found=$((found+1))
           done
           [ "$found" -gt 0 ] || { echo "bundle contains no skills"; exit 1; }
