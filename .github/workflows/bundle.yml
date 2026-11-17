@@ -112,27 +112,37 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: bundle
-          path: dist
+          path: artifact
 
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          asset=$(ls dist/*.tar.gz | head -1)
+          # download-artifact@v4 replays the upload's own directory names, so a
+          # path like dist/x.tar.gz can land at artifact/dist/x.tar.gz. Locate
+          # the files instead of assuming the layout.
+          asset=$(find artifact -name '*.tar.gz' -print -quit)
+          [ -n "$asset" ] || { echo "no bundle tarball in the artifact"; exit 1; }
+          digest="$(dirname "$asset")/$(basename "$asset").sha256"
+          meta="$(dirname "$asset")/bundle-metadata.txt"
+          ls -l artifact
+
           # Verify the digest belongs to this asset, so a stale artifact can
           # never ship next to a mismatched checksum.
-          ( cd dist && sha256sum -c "$(basename "$asset").sha256" )
+          ( cd "$(dirname "$asset")" && sha256sum -c "$(basename "$digest")" )
 
           notes="bk-skills bundle ${GITHUB_REF_NAME}"
-          if [ -f dist/bundle-metadata.txt ]; then
+          if [ -f "$meta" ]; then
             body=$(awk -F'\t' '
               /^skill\t/   { s=$2 }
               /^ref\t/     { r=$2 }
               /^commit\t/  { printf "- %s @ %s (%s)\n", s, r, substr($2,1,8) }
-            ' dist/bundle-metadata.txt)
+            ' "$meta")
             [ -n "$body" ] && notes="Bundled skills, resolved at build time:"$'\n\n'"$body"
           fi
-          gh release create "$GITHUB_REF_NAME" "$asset" "$asset".sha256 dist/bundle-metadata.txt \
+          args=("$asset" "$digest")
+          [ -f "$meta" ] && args+=("$meta")
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
             --title "bk-skills $GITHUB_REF_NAME" \
             --notes "$notes"
