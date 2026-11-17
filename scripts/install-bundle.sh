@@ -41,15 +41,31 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 if [ "$LATEST" = 1 ]; then
-  command -v gh >/dev/null 2>&1 || { echo "install-bundle: --latest needs the gh CLI, or pass a tarball path" >&2; exit 1; }
-  say "resolving latest release of $REPO"
-  asset=$(fetch gh release view --repo "$REPO" --json assets --jq '.assets[0].name' 2>/dev/null | tail -1)
-  [ -n "$asset" ] && [ "$asset" != "null" ] || { echo "install-bundle: $REPO has no release asset yet" >&2; exit 1; }
-  url=$(fetch gh release view --repo "$REPO" --json assets --jq '.assets[0].url' 2>/dev/null | tail -1)
-  say "downloading $asset"
-  curl -sSL -H 'Authorization: token '"$(fetch gh auth token 2>/dev/null || true)" \
-       -o "$TMP/$asset" "$url"
-  src="$TMP/$asset"
+  command -v gh >/dev/null 2>&1 || {
+    echo "install-bundle: --latest needs the gh CLI (and gh auth login). Or fetch the" >&2
+    echo "                  asset yourself and pass its path:" >&2
+    echo "                    gh release download --repo $REPO --pattern '*.tar.gz'" >&2
+    exit 1
+  }
+  say "downloading the latest release of $REPO"
+  # gh release download handles the auth and the API redirect that a plain curl
+  # of the asset URL does not, and keeps the token out of the process list.
+  # The .sha256 arrives as a SEPARATE asset: it is the only anchor that can say
+  # whether the tarball itself is intact, because a digest carried inside the
+  # tarball proves nothing about the download.
+  fetch gh release download --repo "$REPO" --pattern '*.tar.gz' \
+                           --pattern '*.tar.gz.sha256' --dir "$TMP" \
+    || { echo "install-bundle: could not fetch a release asset from $REPO" >&2; exit 1; }
+  src="$(ls "$TMP"/*.tar.gz 2>/dev/null | head -1)"
+  digest="$(ls "$TMP"/*.tar.gz.sha256 2>/dev/null | head -1)"
+  [ -n "$src" ] || { echo "install-bundle: the release carried no tarball" >&2; exit 1; }
+  if [ -n "$digest" ]; then
+    ( cd "$TMP" && sha256sum -c "$(basename "$digest")" ) \
+      || { echo "install-bundle: download does not match its published digest — refusing" >&2; exit 1; }
+    say "downloaded bundle matches the published digest"
+  else
+    say "WARNING: release carried no .sha256 asset; installing this download unverified"
+  fi
 fi
 
 [ -n "$src" ] || { echo "install-bundle: give a bundle path or --latest" >&2; exit 2; }
