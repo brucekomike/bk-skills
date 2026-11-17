@@ -1,0 +1,17 @@
+# bk-skills bundle manifest — which skill repos CI packages, and from what ref.
+#
+# TAB-separated:  name <TAB> https-url <TAB> ref
+# ref may be a branch, a tag, or a 40-char commit. The resolved commit of every
+# entry is written into the release's bundle-metadata.txt, so a release built
+# from a moving branch is still auditable afterwards.
+#
+# Adding a skill = add a line. Removing one = delete it (its own repo keeps
+# serving installs; bk-skills only bundles).
+
+deck-skill		https://github.com/brucekomike/deck-skill.git		main
+mw-skills			https://github.com/brucekomike/mw-skills.git		main
+mission-kickoff-skill	https://github.com/brucekomike/mission-kickoff-skill.git	main
+
+# Excluded from v1 — not fully tested yet, so it is not shipped in the bundle.
+# Re-add when the Nextcloud Collectives surface has been exercised end to end.
+# collective-skill	https://github.com/brucekomike/collective-skill.git	master

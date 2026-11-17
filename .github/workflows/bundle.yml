@@ -1,0 +1,138 @@
+name: bundle-skills
+
+# One build script, two outcomes:
+#   push / PR / nightly -> build only, to prove the bundle still assembles
+#   tag v*              -> build the same way, install it, then publish
+#
+# CI stays a thin wrapper around scripts/build-bundle.sh so a release can never
+# be produced by a path that was not exercised locally. The nightly run matters
+# because the manifest tracks branches: a broken skill repo should surface here,
+# not at someone's install.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (defaults to the tag, else v0.0.0-dev-<timestamp>)'
+        required: false
+        default: ''
+  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the bundle
+        id: build
+        env:
+          BK_SKILLS_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          # tee would hide a build failure behind the pipeline's exit code,
+          # so pipefail is explicit and the log is kept for the artifact.
+          bash scripts/build-bundle.sh | tee build.log
+          tarball=$(tail -1 build.log)
+          echo "tarball=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the bundle against the manifest
+        run: |
+          set -euo pipefail
+          t="dist/${{ steps.build.outputs.tarball }}"
+          test -f "$t"
+          test -f "$t.sha256"
+          test -f dist/bundle-metadata.txt
+
+          rm -rf unpack && mkdir unpack && tar -xzf "$t" -C unpack
+          root=$(ls unpack)
+
+          # The shared loader must be present AND match its shipped digest.
+          test -f "$root/skill-config/loader.sh"
+          test -f "$root/skill-config/loader.sha256"
+          ( cd "$root" && sha256sum -c skill-config/loader.sha256 )
+
+          # Every manifest entry must have been fetched and resolved.
+          n=0
+          while IFS=$'\t' read -r name url ref; do
+            case "$name" in ''|\#*) continue ;; esac
+            grep -P "^skill\t$name\$"    "$root/bundle-metadata.txt" || { echo "missing: $name"; exit 1; }
+            grep -P "^commit\t[0-9a-f]{40}$" "$root/bundle-metadata.txt" >/dev/null || { echo "no resolved commit for $name"; exit 1; }
+            n=$((n+1))
+          done < manifest.tsv
+          echo "verified $n manifest entries"
+
+          # Every bundled skill must be a real skill, not an empty directory.
+          found=0
+          for d in "$root"/skills/*/; do
+            test -f "$d/SKILL.md" || { echo "bundle contains a skill with no SKILL.md: $d"; exit 1; }
+            found=$((found+1))
+          done
+          [ "$found" -gt 0 ] || { echo "bundle contains no skills"; exit 1; }
+          echo "bundle holds $found skills"
+
+      - name: Prove the bundle actually installs
+        run: |
+          set -euo pipefail
+          bash scripts/install-bundle.sh "dist/${{ steps.build.outputs.tarball }}"
+          test -f "$HOME/.config/skill-config/loader.sh" || {
+            echo "install-bundle did not place the loader"; exit 1; }
+          # Re-running must be a no-op rather than a corruption: idempotence is
+          # the property people rely on when they re-run an installer.
+          bash scripts/install-bundle.sh "dist/${{ steps.build.outputs.tarball }}" >/dev/null
+          test -f "$HOME/.config/skill-config/loader.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bundle
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/bundle-metadata.txt
+            build.log
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          asset=$(ls dist/*.tar.gz | head -1)
+          # Verify the digest belongs to this asset, so a stale artifact can
+          # never ship next to a mismatched checksum.
+          ( cd dist && sha256sum -c "$(basename "$asset").sha256" )
+
+          notes="bk-skills bundle ${GITHUB_REF_NAME}"
+          if [ -f dist/bundle-metadata.txt ]; then
+            body=$(awk -F'\t' '
+              /^skill\t/   { s=$2 }
+              /^ref\t/     { r=$2 }
+              /^commit\t/  { printf "- %s @ %s (%s)\n", s, r, substr($2,1,8) }
+            ' dist/bundle-metadata.txt)
+            [ -n "$body" ] && notes="Bundled skills, resolved at build time:"$'\n\n'"$body"
+          fi
+          gh release create "$GITHUB_REF_NAME" "$asset" "$asset".sha256 dist/bundle-metadata.txt \
+            --title "bk-skills $GITHUB_REF_NAME" \
+            --notes "$notes"
