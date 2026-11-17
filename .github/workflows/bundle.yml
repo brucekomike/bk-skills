@@ -1,23 +1,23 @@
 name: bundle-skills
 
-# One build script, two outcomes:
-#   push / PR / nightly -> build only, to prove the bundle still assembles
-#   tag v*              -> build the same way, install it, then publish
+# Rolling channel, not versioned releases. Every push to main (or a manual run)
+# rebuilds the bundle and re-uploads it to the single `latest` release, so there
+# is no version to bump and no tag to cut. Traceability lives in
+# bundle-metadata.txt: the resolved commit of every skill, this repo's commit and
+# the build time.
 #
-# CI stays a thin wrapper around scripts/build-bundle.sh so a release can never
-# be produced by a path that was not exercised locally. The nightly run matters
+#   push main / workflow_dispatch -> build, verify, install, then re-upload
+#   pull_request / nightly        -> build and verify only, publish nothing
+#
+# CI stays a thin wrapper around scripts/build-bundle.sh so a published bundle is
+# never produced by a path that was not exercised locally. The nightly run matters
 # because the manifest tracks branches: a broken skill repo should surface here,
 # not at someone's install.
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to build (defaults to the tag, else v0.0.0-dev-<timestamp>)'
-        required: false
-        default: ''
   pull_request:
   schedule:
     - cron: '17 3 * * *'
@@ -33,12 +33,9 @@ jobs:
 
       - name: Build the bundle
         id: build
-        env:
-          BK_SKILLS_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
-          # tee would hide a build failure behind the pipeline's exit code,
-          # so pipefail is explicit and the log is kept for the artifact.
+          # tee would hide a build failure behind the pipeline's exit code.
           bash scripts/build-bundle.sh | tee build.log
           tarball=$(tail -1 build.log)
           echo "tarball=$(basename "$tarball")" >> "$GITHUB_OUTPUT"
@@ -58,13 +55,11 @@ jobs:
           root="unpack/$(ls unpack)"
           [ -d "$root" ] || { echo "unexpected bundle layout: no $root/"; exit 1; }
 
-          # The shared loader must be present AND match its shipped digest.
           for f in skill-config/loader.sh skill-config/loader.sha256 bundle-metadata.txt; do
             test -f "$root/$f" || { echo "bundle is missing $f"; exit 1; }
           done
           ( cd "$root" && sha256sum -c skill-config/loader.sha256 )
 
-          # Every manifest entry must have been fetched and resolved.
           n=0
           while IFS=$'\t' read -r name url ref; do
             case "$name" in ''|\#*) continue ;; esac
@@ -77,7 +72,6 @@ jobs:
             || { echo "metadata has no resolved 40-char commit"; exit 1; }
           echo "verified $n manifest entries"
 
-          # Every bundled skill must be a real skill, not an empty directory.
           found=0
           shopt -s nullglob
           for d in "$root"/skills/*/; do
@@ -93,8 +87,7 @@ jobs:
           bash scripts/install-bundle.sh "dist/${{ steps.build.outputs.tarball }}"
           test -f "$HOME/.config/skill-config/loader.sh" || {
             echo "install-bundle did not place the loader"; exit 1; }
-          # Re-running must be a no-op rather than a corruption: idempotence is
-          # the property people rely on when they re-run an installer.
+          # Re-running must be a no-op rather than a corruption.
           bash scripts/install-bundle.sh "dist/${{ steps.build.outputs.tarball }}" >/dev/null
           test -f "$HOME/.config/skill-config/loader.sh"
 
@@ -109,9 +102,9 @@ jobs:
             build.log
           if-no-files-found: error
 
-  release:
+  publish:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -123,35 +116,46 @@ jobs:
           name: bundle
           path: artifact
 
-      - name: Publish
+      - name: Re-upload to the rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # download-artifact@v4 replays the upload's own directory names, so a
-          # path like dist/x.tar.gz can land at artifact/dist/x.tar.gz. Locate
-          # the files instead of assuming the layout.
+          # download-artifact@v4 replays the upload's directory names, so locate
+          # the files rather than assuming the layout.
           asset=$(find artifact -name '*.tar.gz' -print -quit)
           [ -n "$asset" ] || { echo "no bundle tarball in the artifact"; exit 1; }
-          digest="$(dirname "$asset")/$(basename "$asset").sha256"
-          meta="$(dirname "$asset")/bundle-metadata.txt"
-          ls -l artifact
+          dir=$(dirname "$asset")
+          digest="$dir/$(basename "$asset").sha256"
+          meta="$dir/bundle-metadata.txt"
 
-          # Verify the digest belongs to this asset, so a stale artifact can
-          # never ship next to a mismatched checksum.
-          ( cd "$(dirname "$asset")" && sha256sum -c "$(basename "$digest")" )
+          # Verify the digest belongs to this asset before it goes anywhere.
+          ( cd "$dir" && sha256sum -c "$(basename "$digest")" )
 
-          notes="bk-skills bundle ${GITHUB_REF_NAME}"
+          notes="Rolling bundle — rebuilt on every push to main."$'\n\n'
           if [ -f "$meta" ]; then
-            body=$(awk -F'\t' '
-              /^skill\t/   { s=$2 }
-              /^ref\t/     { r=$2 }
-              /^commit\t/  { printf "- %s @ %s (%s)\n", s, r, substr($2,1,8) }
+            notes+="Bundled skills, resolved at build time:"$'\n\n'
+            notes+=$(awk -F'\t' '
+              /^skill\t/  { s=$2 }
+              /^ref\t/    { r=$2 }
+              /^commit\t/ { printf "- %s @ %s (%s)\n", s, r, substr($2,1,8) }
             ' "$meta")
-            [ -n "$body" ] && notes="Bundled skills, resolved at build time:"$'\n\n'"$body"
+            notes+=$'\n\n'"Built $(date -u +%Y-%m-%dT%H:%M:%SZ) from ${GITHUB_SHA:0:8}."
           fi
+
           args=("$asset" "$digest")
           [ -f "$meta" ] && args+=("$meta")
-          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
-            --title "bk-skills $GITHUB_REF_NAME" \
-            --notes "$notes"
+
+          # Create once, then replace assets in place. The tag is never moved and
+          # the release is never deleted, so a download in flight cannot 404 and
+          # nothing needs a force-push; the metadata records the real build commit.
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest "${args[@]}" --clobber
+            gh release edit latest --title "bk-skills (rolling)" --notes "$notes"
+            echo "re-uploaded to the existing rolling release"
+          else
+            gh release create latest "${args[@]}" \
+              --target "$GITHUB_SHA" --title "bk-skills (rolling)" --notes "$notes"
+            echo "created the rolling release"
+          fi
+          gh release view latest --json assets --jq '.assets[].name'

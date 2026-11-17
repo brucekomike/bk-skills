@@ -37,8 +37,11 @@ declare -gA SKILLCONF_BASENAME=(
   [DECK]="deck-skill"
   [COLLECTIVE]="collective-skill"
   [MW]="mw-skills"
+  [MK]="mission-kickoff"
 )
-# slot -> variable suffix, in positional order
+# slot -> variable suffix, in positional order. MK has no sites (its profile is
+# scalar MK_* variables), so it deliberately has no entry here and skillconf_apply
+# refuses it with code 3 rather than pretending to resolve one.
 declare -gA SKILLCONF_SLOTS=(
   [DECK]="URL USER TOKEN PROXY"
   [COLLECTIVE]="URL USER TOKEN PROXY"
@@ -155,7 +158,9 @@ is_site_array() {
 # owner would be told "unknown site profile" for a site plainly in their file.
 skillconf_listsites() {
   local prefix="$1" nm sfx reserved
-  reserved=" ${SKILLCONF_RESERVED[$prefix]} "
+  # `:-` because a skill with no sites (MK) has no reserved set, and a caller
+  # running under `set -u` must not be aborted by asking.
+  reserved=" ${SKILLCONF_RESERVED[$prefix]:-} "
   while IFS= read -r nm; do
     is_site_array "$nm" || continue
     sfx="${nm#${prefix}_}"
@@ -165,4 +170,27 @@ skillconf_listsites() {
     fi
     printf '%s\n' "${sfx,,}"
   done < <(compgen -v "${prefix}_" | sort -u)
+}
+
+# The workspace a config belongs to. A path shaped <root>/.config/.<skill>.sh
+# carries its own answer, so the root is derived rather than restated — that is
+# what stops it drifting when a workspace is renamed or moved. Anything else
+# (an explicit --config file, the global fallback) has no implied root.
+skillconf_rootof() {
+  local cfg="$1"
+  [ -n "$cfg" ] && [ "$(basename "$(dirname "$cfg")")" = ".config" ] || return 1
+  dirname "$(dirname "$cfg")"
+}
+
+# Every workspace under $1 that declares this skill's file. Read-only; used by
+# skills to report which workspaces are configured and which are not.
+skillconf_workspaces() {
+  local base="$1" prefix="$2" file f d
+  [ -d "$base" ] || return 1
+  file="${SKILLCONF_BASENAME[$prefix]:-}"
+  [ -n "$file" ] || return 1
+  while IFS= read -r f; do
+    d="$(skillconf_rootof "$f")" || continue
+    printf '%s\n' "$d"
+  done < <(find "$base" -maxdepth 3 -path "*/.config/.$file.sh" -not -path '*/.git/*' 2>/dev/null | sort)
 }

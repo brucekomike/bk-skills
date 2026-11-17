@@ -38,8 +38,10 @@ done
 [ -f "$LOADER" ]   || { echo "build-bundle: missing shared loader $LOADER" >&2; exit 1; }
 
 if [ -z "$VERSION" ]; then
-  VERSION="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
-  [ -n "$VERSION" ] || VERSION="v0.0.0-dev-$(date -u +%Y%m%dT%H%M%SZ)"
+  # Rolling channel: the bundle is always "latest", rebuilt and re-uploaded on
+  # demand. Traceability comes from bundle-metadata.txt (resolved commit per
+  # skill, plus this repo's commit and the build time), not from a version number.
+  VERSION="latest"
 fi
 
 STAGE="$(mktemp -d)"

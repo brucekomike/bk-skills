@@ -15,7 +15,7 @@ code. `manifest.tsv` decides what gets bundled.
 ## Install everything at once
 
 ```bash
-bash scripts/install-bundle.sh dist/bk-skills-v0.1.0.tar.gz   # from a checkout
+bash scripts/install-bundle.sh dist/bk-skills-latest.tar.gz   # from a checkout
 ```
 
 or grab the newest published bundle:
@@ -64,21 +64,27 @@ install.sh: shared loader not found at ~/.config/skill-config/loader.sh
               bash scripts/install-bundle.sh ./bk-skills-*.tar.gz
 ```
 
-## Releases
+## Rolling release — no versioning
 
-Pushing a tag builds and publishes:
+There is one release, `latest`, and it is rebuilt and re-uploaded on every push to
+`main` (or a manual workflow run). Nothing to bump, no tag to cut:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0     # workflow publishes the asset
+git push origin main                  # CI rebuilds and re-uploads the bundle
+gh workflow run bundle-skills         # or rebuild on demand, without a commit
 ```
 
-The release carries the tarball, its `.sha256`, and `bundle-metadata.txt`
-recording the **resolved commit of every skill** — because the manifest tracks
-branches, that file is what makes a release reproducible after the fact.
+The release carries the tarball, its `.sha256`, and `bundle-metadata.txt` recording
+the **resolved commit of every skill**, this repo's commit and the build time.
+Because the manifest tracks branches, that metadata — not a version number — is
+what makes a given bundle reproducible after the fact.
 
-Non-tag events (push, PR, and a nightly cron) build and verify the bundle
-without publishing, so a broken skill repo surfaces in CI rather than at
-someone's install.
+The tag is never moved and the release is never deleted: assets are replaced with
+`--clobber`, so a download already in flight cannot 404 and nothing needs a
+force-push.
+
+Pull requests and the nightly cron build and verify without publishing, so a broken
+skill repo surfaces in CI rather than at someone's install.
 
 ## What is bundled
 
@@ -99,13 +105,13 @@ manifest.tsv                     who gets bundled, and from what ref
 skill-config/loader.sh           the shared helper (canonical copy)
 scripts/build-bundle.sh          clones + assembles + checksums  (local == CI)
 scripts/install-bundle.sh        unpack, place, link, verify
-.github/workflows/bundle.yml     build on push/PR/nightly, publish on tag
+.github/workflows/bundle.yml     build on push/PR/nightly, re-upload on push to main
 ```
 
 ## Building locally
 
 ```bash
-bash scripts/build-bundle.sh --version v0.1.0
+bash scripts/build-bundle.sh          # defaults to the rolling "latest"
 ```
 
 On a machine where GitHub needs a proxy, the script prefixes its own git
